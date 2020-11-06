@@ -40,7 +40,7 @@ def create_logging(log_dir, filemode):
         
     log_path = os.path.join(log_dir, '{:04d}.log'.format(i1))
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.INFO,
         format='%(asctime)s %(filename)s[line:%(lineno)d] %(levelname)s %(message)s',
         datefmt='%a, %d %b %Y %H:%M:%S',
         filename=log_path,
@@ -78,7 +78,7 @@ def read_metadata(csv_path, classes_num, id_to_ix):
         items = line.split(', ')
         """items: ['--4gqARaEJE', '0.000', '10.000', '"/m/068hy,/m/07q6cd_,/m/0bt9lr,/m/0jbk"\n']"""
 
-        audio_name = 'Y{}.wav'.format(items[0])   # Audios are started with an extra 'Y' when downloading
+        audio_name = '{}_{}_{}.flac'.format(items[0], int(1000*eval(items[1])), int(1000*eval(items[2])))   # Audios are started with an extra 'Y' when downloading
         label_ids = items[3].split('"')[1].split(',')
 
         audio_names.append(audio_name)
