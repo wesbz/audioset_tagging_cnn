@@ -3,6 +3,8 @@ import time
 import torch
 import torch.nn as nn
 
+from tqdm import tqdm
+
 
 def move_data_to_device(x, device):
     if 'float' in str(x.dtype):
@@ -61,8 +63,8 @@ def forward(model, generator, return_input=False,
     time1 = time.time()
 
     # Forward data to a model in mini-batches
-    for n, batch_data_dict in enumerate(generator):
-        print(n)
+    for n, batch_data_dict in tqdm(enumerate(generator)):
+        #print(n)
         batch_waveform = move_data_to_device(batch_data_dict['waveform'], device)
         
         with torch.no_grad():
@@ -249,3 +251,137 @@ def count_flops(model, audio_length):
         sum(list_bn) + sum(list_relu) + sum(list_pooling2d) + sum(list_pooling1d)
     
     return total_flops
+
+
+def modularize_function(func, *args, **kwargs):
+    class FuncModule(nn.Module):
+        def __init__(self, func, *args, **kwargs):
+            super(FuncModule, self).__init__()
+            self.func = func
+            self.args = args
+            self.kwargs = kwargs
+        
+        def forward(self, input):
+            return self.func(input, *self.args, **self.kwargs)
+    
+    return FuncModule(func, *args, **kwargs)
+
+
+def parse_arch(arch_filepath, ):
+
+    modules = []
+
+    with open(arch_filepath, "r") as arch_file:
+        layers = arch_file.readlines()
+        for layer in layers:
+            layer = layer.strip("\n").split(" ")
+            layer, *params = layer
+
+            # ========== TRANSFORMATIONS ========== #
+            if (layer == "RO"):
+                if len(params) != 5: raise ValueError("Failed parsing RO layer: incorrect number of parameters.")
+                dim1 = int(params[1])
+                dim2 = int(params[2])
+                dim3 = int(params[3])
+                dim4 = int(params[4])
+                
+                modules.append(modularize_function(torch.Tensor.permute, dim1, dim2, dim3, dim4))
+
+            elif (layer == "V"):
+                if len(params) != 5: raise ValueError("Failed parsing V layer: incorrect number of parameters.")
+                dim1 = int(params[1])
+                dim2 = int(params[2])
+                dim3 = int(params[3])
+                dim4 = int(params[4])
+
+                modules.append(modularize_function(torch.Tensor.view, dim1, dim2, dim3, dim4))
+            elif (layer == "PD"):
+                pass
+            # ========== TRANSFORMERS ========== #
+            elif (layer == "TR"):
+                model_dim =         int(params[1])
+                mlp_dim =           int(params[2])
+                n_head =            int(params[3])
+                csz =               int(params[4])
+                p_dropout =         float(params[5])
+                p_layer_dropout =   float(params[6]) if len(params) >= 7 else 0.0
+                pre_LN =            eval(params[7]) if len(params) >= 8 else 0
+
+                module = nn.TransformerEncoderLayer()
+                modules.append(module)
+
+                pass #TODO
+            elif (layer == "POSEMB"):
+                pass
+            # ========== CONVOLUTIONS ========== #
+            elif (layer == "C") or (layer == "C1"):
+                pass #TODO
+            elif (layer == "TDS"):
+                pass
+            elif (layer == "AC"):
+                pass
+            elif (layer == "C2"):
+                pass
+            # ========== LINEAR ========== #
+            elif (layer == "L"):
+                pass #TODO
+            # ========== EMBEDDING ========== #
+            elif (layer == "E"):
+                pass
+            # ========== NORMALIZATIONS ========== #
+            elif (layer == "BN"):
+                pass
+            elif (layer == "LN"):
+                pass #TODO
+            elif (layer == "WN"):
+                pass
+            elif (layer == "DO"):
+                pass #TODO
+            # ========== POOLING ========== #
+            elif (layer == "M") or (layer == "A"):
+                pass
+            # ========== ACTIVATIONS ========== #
+            elif (layer == "ELU"):
+                pass
+            elif (layer == "R"):
+                pass
+            elif (layer == "R6"):
+                pass
+            elif (layer == "PR"):
+                pass
+            elif (layer == "LG"):
+                pass
+            elif (layer == "HT"):
+                pass
+            elif (layer == "T"):
+                pass
+            elif (layer == "GLU"):
+                pass #TODO
+            elif (layer == "LSM"):
+                pass
+            elif (layer == "SH"):
+                pass
+            # ========== RNN ========== #
+            elif (layer == "RNN"):
+                pass
+            elif (layer == "GRU"):
+                pass
+            elif (layer == "LSTM"):
+                pass
+            # ========== Residual Block ========== #
+            elif (layer == "RES"):
+                pass
+            # ========== Data Augmentation ========== #
+            elif (layer == "SAUG"):
+                pass
+            # ========== Trainable Frontend ========== #
+            elif (layer == "SL2P"):
+                pass
+            elif (layer == "LC"):
+                pass
+            elif (layer == "LPF"):
+                pass
+            elif (layer == "WF"):
+                pass
+            elif (layer == ""):
+                pass

@@ -11,6 +11,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import torch.utils.data
+
+from tqdm import tqdm
+import datetime
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel
+import os
  
 from utilities import (create_folder, get_filename, create_logging, Mixup, 
     StatisticsContainer)
@@ -19,7 +26,8 @@ from models import (Cnn14, Cnn14_no_specaug, Cnn14_no_dropout,
     Cnn14_emb32, MobileNetV1, MobileNetV2, LeeNet11, LeeNet24, DaiNet19, 
     Res1dNet31, Res1dNet51, Wavegram_Cnn14, Wavegram_Logmel_Cnn14, 
     Wavegram_Logmel128_Cnn14, Cnn14_16k, Cnn14_8k, Cnn14_mel32, Cnn14_mel128, 
-    Cnn14_mixup_time_domain, Cnn14_DecisionLevelMax, Cnn14_DecisionLevelAtt)
+    Cnn14_mixup_time_domain, Cnn14_DecisionLevelMax, Cnn14_DecisionLevelAtt,
+    TransformerModel)
 from pytorch_utils import (move_data_to_device, count_parameters, count_flops, 
     do_mixup)
 from data_generator import (AudioSetDataset, TrainSampler, BalancedTrainSampler, 
@@ -71,7 +79,13 @@ def train(args):
     device = torch.device('cuda') if args.cuda and torch.cuda.is_available() else torch.device('cpu')
     filename = args.filename
 
-    num_workers = 8
+    num_workers = 32
+    prefetch_factor = 4
+    
+    #os.environ["MASTER_ADDR"] = "localhost"
+    #os.environ["MASTER_PORT"] = "12355"
+    #dist.init_process_group("nccl", rank=rank, world_size=args.world_size)
+
     clip_samples = config.clip_samples
     classes_num = config.classes_num
     loss_func = get_loss_func(loss_type)
@@ -93,7 +107,9 @@ def train(args):
         sample_rate, window_size, hop_size, mel_bins, fmin, fmax), 
         'data_type={}'.format(data_type), model_type, 
         'loss_type={}'.format(loss_type), 'balanced={}'.format(balanced), 
-        'augmentation={}'.format(augmentation), 'batch_size={}'.format(batch_size))
+        'augmentation={}'.format(augmentation), 'batch_size={}'.format(batch_size), datetime.datetime.now().strftime("%d%m%Y_%H%M%S"))
+    
+    #if rank == 0:
     create_folder(checkpoints_dir)
     
     statistics_path = os.path.join(workspace, 'statistics', filename, 
@@ -103,6 +119,8 @@ def train(args):
         'loss_type={}'.format(loss_type), 'balanced={}'.format(balanced), 
         'augmentation={}'.format(augmentation), 'batch_size={}'.format(batch_size), 
         'statistics.pkl')
+    
+    #if rank == 0:
     create_folder(os.path.dirname(statistics_path))
 
     logs_dir = os.path.join(workspace, 'logs', filename, 
@@ -152,23 +170,23 @@ def train(args):
     
     # Evaluate sampler
     eval_bal_sampler = EvaluateSampler(
-        indexes_hdf5_path=eval_bal_indexes_hdf5_path, batch_size=batch_size)
+        indexes_hdf5_path=eval_bal_indexes_hdf5_path, batch_size=2*batch_size)
 
     eval_test_sampler = EvaluateSampler(
-        indexes_hdf5_path=eval_test_indexes_hdf5_path, batch_size=batch_size)
+        indexes_hdf5_path=eval_test_indexes_hdf5_path, batch_size=2*batch_size)
 
     # Data loader
     train_loader = torch.utils.data.DataLoader(dataset=dataset, 
         batch_sampler=train_sampler, collate_fn=collate_fn, 
-        num_workers=num_workers, pin_memory=True)
+        num_workers=num_workers, pin_memory=True, prefetch_factor=prefetch_factor)
     
     eval_bal_loader = torch.utils.data.DataLoader(dataset=dataset, 
         batch_sampler=eval_bal_sampler, collate_fn=collate_fn, 
-        num_workers=num_workers, pin_memory=True)
+        num_workers=num_workers, pin_memory=True, prefetch_factor=prefetch_factor)
 
     eval_test_loader = torch.utils.data.DataLoader(dataset=dataset, 
         batch_sampler=eval_test_sampler, collate_fn=collate_fn, 
-        num_workers=num_workers, pin_memory=True)
+        num_workers=num_workers, pin_memory=True, prefetch_factor=prefetch_factor)
 
     if 'mixup' in augmentation:
         mixup_augmenter = Mixup(mixup_alpha=1.)
@@ -211,8 +229,17 @@ def train(args):
 
     if 'cuda' in str(device):
         model.to(device)
+        #model = model.cuda(rank)
     
+    #model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[rank])
+    #print([(s[0], s[1].is_cuda) for s in model.named_parameters()])
+
     time1 = time.time()
+    
+    prev_bal_map = 0.0
+    prev_test_map = 0.0
+    save_bal_model = 0
+    save_test_model = 0
     
     for batch_data_dict in train_loader:
         """batch_data_dict: {
@@ -221,9 +248,9 @@ def train(args):
             'target': (batch_size [*2 if mixup], classes_num), 
             (ifexist) 'mixup_lambda': (batch_size * 2,)}
         """
-        
+        #print(batch_data_dict)
         # Evaluate
-        if (iteration % 2000 == 0 and iteration > resume_iteration) or (iteration == 0):
+        if (iteration % 2000 == 0 and iteration > resume_iteration) or (iteration == -1):
             train_fin_time = time.time()
 
             bal_statistics = evaluator.evaluate(eval_bal_loader)
@@ -235,6 +262,9 @@ def train(args):
             logging.info('Validate test mAP: {:.3f}'.format(
                 np.mean(test_statistics['average_precision'])))
 
+            save_bal_model = 1 if np.mean(bal_statistics['average_precision']) > prev_bal_map else 0
+            save_test_model = 1 if np.mean(test_statistics['average_precision']) > prev_test_map else 0
+            
             statistics_container.append(iteration, bal_statistics, data_type='bal')
             statistics_container.append(iteration, test_statistics, data_type='test')
             statistics_container.dump()
@@ -262,6 +292,32 @@ def train(args):
                 
             torch.save(checkpoint, checkpoint_path)
             logging.info('Model saved to {}'.format(checkpoint_path))
+        
+        if save_bal_model:
+            checkpoint = {
+                'iteration': iteration, 
+                'model': model.module.state_dict(), 
+                'sampler': train_sampler.state_dict()}
+
+            checkpoint_path = os.path.join(
+                checkpoints_dir, '{}_iterations_bal.pth'.format(iteration))
+                
+            torch.save(checkpoint, checkpoint_path)
+            logging.info('Model saved to {}'.format(checkpoint_path))
+            save_bal_model = 0
+        
+        if save_test_model:
+            checkpoint = {
+                'iteration': iteration, 
+                'model': model.module.state_dict(), 
+                'sampler': train_sampler.state_dict()}
+
+            checkpoint_path = os.path.join(
+                checkpoints_dir, '{}_iterations_test.pth'.format(iteration))
+                
+            torch.save(checkpoint, checkpoint_path)
+            logging.info('Model saved to {}'.format(checkpoint_path))
+            save_test_model = 0
         
         # Mixup lambda
         if 'mixup' in augmentation:
@@ -335,11 +391,14 @@ if __name__ == '__main__':
     parser_train.add_argument('--resume_iteration', type=int, default=0)
     parser_train.add_argument('--early_stop', type=int, default=1000000)
     parser_train.add_argument('--cuda', action='store_true', default=False)
+    parser_train.add_argument('--world_size', type=int, default=1)
     
     args = parser.parse_args()
     args.filename = get_filename(__file__)
 
     if args.mode == 'train':
+        world_size = args.world_size
+        #mp.spawn(train, args=(args,), nprocs=world_size, join=True)
         train(args)
 
     else:

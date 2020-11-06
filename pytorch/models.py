@@ -3314,3 +3314,164 @@ class Cnn14_DecisionLevelAtt(nn.Module):
             'clipwise_output': clipwise_output}
 
         return output_dict
+
+
+import math
+class PositionalEmbedding(nn.Module):
+
+    def __init__(self, d_model, dropout=0.1, max_len=5000):
+        super(PositionalEmbedding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0).transpose(0, 1)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        x = x + self.pe[:x.size(0), :]
+        return self.dropout(x)
+
+
+class TransformerModel(nn.Module):
+    def __init__(self, sample_rate, window_size, hop_size, mel_bins, fmin, 
+        fmax, classes_num):
+        
+        super(TransformerModel, self).__init__()
+
+        window = 'hann'
+        center = True
+        pad_mode = 'reflect'
+        ref = 1.0
+        amin = 1e-10
+        top_db = None
+
+        CHANNELS = 2048
+        TRANSFORMER_DIM = 512
+        N_HEADS = 4
+        N_TRANSFORMER_LAYERS = 24
+
+        # Spectrogram extractor
+        self.spectrogram_extractor = Spectrogram(n_fft=window_size, hop_length=hop_size, 
+            win_length=window_size, window=window, center=center, pad_mode=pad_mode, 
+            freeze_parameters=True)
+
+        # Logmel feature extractor
+        self.logmel_extractor = LogmelFilterBank(sr=sample_rate, n_fft=window_size, 
+            n_mels=mel_bins, fmin=fmin, fmax=fmax, ref=ref, amin=amin, top_db=top_db, 
+            freeze_parameters=True)
+
+        # Spec augmenter
+        self.spec_augmenter = SpecAugmentation(time_drop_width=64, time_stripes_num=2, 
+            freq_drop_width=8, freq_stripes_num=2)
+
+        
+        self.layer_norm1 = nn.LayerNorm((mel_bins, 1))
+        self.conv_1 = nn.Conv2d(in_channels=mel_bins, out_channels=CHANNELS, kernel_size=(3, 1), stride=(2, 1), padding=(1, 0))
+        self.dropout_1 = nn.Dropout(p=0.3)
+
+        self.layer_norm2 = nn.LayerNorm((CHANNELS//2, 1))
+        self.conv_2 = nn.Conv2d(in_channels=CHANNELS//2, out_channels=CHANNELS, kernel_size=(3, 1), stride=(2, 1), padding=(1, 0))
+        self.dropout_1 = nn.Dropout(p=0.3)
+
+        self.layer_norm3 = nn.LayerNorm((CHANNELS//2, 1))
+        self.conv_3 = nn.Conv2d(in_channels=CHANNELS//2, out_channels=CHANNELS, kernel_size=(3, 1), stride=(2, 1), padding=(1, 0))
+        self.dropout_1 = nn.Dropout(p=0.3)
+
+        self.layer_norm4 = nn.LayerNorm((CHANNELS//2, 1))
+        self.conv_4 = nn.Conv2d(in_channels=CHANNELS//2, out_channels=2*TRANSFORMER_DIM, kernel_size=(3, 1), stride=(2, 1), padding=(1, 0))
+        self.dropout_1 = nn.Dropout(p=0.3)
+
+        self.pos_emb = PositionalEmbedding(TRANSFORMER_DIM)
+
+        self.transformer_layers = nn.ModuleList([nn.TransformerEncoderLayer(TRANSFORMER_DIM, N_HEADS, 4*TRANSFORMER_DIM, 0.3) for _ in range(N_TRANSFORMER_LAYERS)])
+
+        self.fc_audioset = nn.Linear(TRANSFORMER_DIM, classes_num, bias=True)
+        
+        self.init_weight()
+
+    def init_weight(self):
+        init_bn(self.layer_norm1)
+        init_bn(self.layer_norm2)
+        init_bn(self.layer_norm3)
+        init_bn(self.layer_norm4)
+        init_layer(self.conv_1)
+        init_layer(self.conv_2)
+        init_layer(self.conv_3)
+        init_layer(self.conv_4)
+        for layer in self.transformer_layers:
+            nn.init.xavier_uniform_(layer.self_attn.in_proj_weight)
+            layer.self_attn.in_proj_bias.data.fill_(0)
+            nn.init.xavier_uniform_(layer.self_attn.out_proj.weight)
+            layer.self_attn.out_proj.bias.data.fill_(0)
+            init_layer(layer.linear1)
+            init_layer(layer.linear2)
+            init_bn(layer.norm1)
+            init_bn(layer.norm2)
+        init_layer(self.fc_audioset)
+ 
+    def forward(self, input, mixup_lambda=None):
+        """
+        Input: (batch_size, data_length)"""
+
+        x = self.spectrogram_extractor(input)   # (batch_size, 1, time_steps, freq_bins)
+        x = self.logmel_extractor(x)    # (batch_size, 1, time_steps, mel_bins)
+        
+        if self.training:
+            x = self.spec_augmenter(x)
+
+        # Mixup on spectrogram
+        if self.training and mixup_lambda is not None:
+            x = do_mixup(x, mixup_lambda)
+        
+        x = x.permute(0, 2, 3, 1) # (batch_size, time_steps, mel_bins, 1)
+        x = self.layer_norm1(x)
+        x = x.transpose(1, 2) # (batch_size, mel_bins, time_steps, 1)
+        x = self.conv_1(x) # (batch_size, 2048, time_steps, 1)
+        x = F.glu(x, dim=1) # (batch_size, 1024, time_steps, 1)
+        x = F.dropout(x, p=0.3, training=self.training)
+        
+        x = x.transpose(1, 2) # (batch_size, time_steps, 1024, 1)
+        x = self.layer_norm2(x)
+        x = x.transpose(1, 2) # (batch_size, 1024, time_steps, 1)
+        x = self.conv_2(x) # (batch_size, 2048, time_steps, 1)
+        x = F.glu(x, dim=1) # (batch_size, 1024, time_steps, 1)
+        x = F.dropout(x, p=0.3, training=self.training)
+        
+        x = x.transpose(1, 2) # (batch_size, time_steps, 1024, 1)
+        x = self.layer_norm3(x)
+        x = x.transpose(1, 2) # (batch_size, 1024, time_steps, 1)
+        x = self.conv_3(x) # (batch_size, 2048, time_steps, 1)
+        x = F.glu(x, dim=1) # (batch_size, 1024, time_steps, 1)
+        x = F.dropout(x, p=0.3, training=self.training)
+        
+        x = x.transpose(1, 2) # (batch_size, time_steps, 1024, 1)
+        x = self.layer_norm4(x)
+        x = x.transpose(1, 2) # (batch_size, 1024, time_steps, 1)
+        x = self.conv_4(x) # (batch_size, 1536, time_steps, 1)
+        x = F.glu(x, dim=1) # (batch_size, 768, time_steps, 1)
+        x = F.dropout(x, p=0.3, training=self.training)
+
+        x = x.permute(2, 0, 1, 3) # (time_steps, batch_size, 768, 1)
+        x = x.squeeze() # (time_steps, batch_size, 768)
+        for layer in self.transformer_layers:
+            x += self.pos_emb(x)
+            x = layer(x)
+        
+        x = torch.logsumexp(x, dim=0).squeeze() # (batch_size, 768)
+        
+        # (x1, _) = torch.max(x, dim=2)
+        # x2 = torch.mean(x, dim=2)
+        # x = x1 + x2
+        # x = F.dropout(x, p=0.5, training=self.training)
+        # x = F.relu_(self.fc1(x))
+        # embedding = F.dropout(x, p=0.5, training=self.training)
+
+        clipwise_output = torch.sigmoid(self.fc_audioset(x))
+        
+        output_dict = {'clipwise_output': clipwise_output}
+
+        return output_dict

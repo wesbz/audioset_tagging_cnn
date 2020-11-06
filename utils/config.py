@@ -1,7 +1,7 @@
 import numpy as np
 import csv
 
-sample_rate = 32000
+sample_rate = 48000
 clip_samples = sample_rate * 10     # Audio clips are 10-second
 
 # Load label
