@@ -56,6 +56,7 @@ done
 # ============ Pack waveform and target to hdf5 ============
 # Pack evaluation waveforms to a single hdf5 file
 python3 utils/dataset.py pack_waveforms_to_hdf5 --csv_path=$DATASET_DIR"/metadata/eval_segments.csv" --audios_dir=$DATASET_DIR"/audios/eval_segments" --waveforms_hdf5_path=$WORKSPACE"/hdf5s/waveforms/eval.h5"
+python3 utils/dataset.py pack_waveforms_to_hdf5 --csv_path="/datasets01/audioset/042319/eval_segments.csv" --audios_dir="/datasets01/audioset/042319/data/eval_segments/audio" --waveforms_hdf5_path="/checkpoint/wesbz/datasets01/audioset_hdf5/hdf5s/waveforms/eval.h5"
 
 # Pack balanced training waveforms to a single hdf5 file
 python3 utils/dataset.py pack_waveforms_to_hdf5 --csv_path=$DATASET_DIR"/metadata/balanced_train_segments.csv" --audios_dir=$DATASET_DIR"/audios/balanced_train_segments" --waveforms_hdf5_path=$WORKSPACE"/hdf5s/waveforms/balanced_train.h5"

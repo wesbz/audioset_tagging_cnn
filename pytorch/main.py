@@ -79,7 +79,7 @@ def train(args):
     device = torch.device('cuda') if args.cuda and torch.cuda.is_available() else torch.device('cpu')
     filename = args.filename
 
-    num_workers = 32
+    num_workers = 128
     prefetch_factor = 4
     
     #os.environ["MASTER_ADDR"] = "localhost"
